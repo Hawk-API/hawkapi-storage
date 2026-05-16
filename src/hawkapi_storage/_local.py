@@ -9,6 +9,7 @@ import hmac
 import os
 import shutil
 import time
+import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -51,10 +52,17 @@ class LocalStorage:
         )
 
     def _path(self, key: str) -> Path:
-        safe = key.lstrip("/")
-        if ".." in Path(safe).parts:
+        # Reject control characters outright — NUL anywhere in a path is
+        # never legitimate and can confuse downstream tooling.
+        if "\x00" in key:
+            raise StorageError("invalid key (control characters)")
+        root = Path(self.config.root).resolve()
+        # ``resolve()`` collapses every ``..`` segment so escapes can be
+        # detected unambiguously, no matter how they are spelled.
+        target = (root / key.lstrip("/")).resolve()
+        if not target.is_relative_to(root):
             raise StorageError("invalid key (path traversal)")
-        return Path(self.config.root, safe)
+        return target
 
     async def put(
         self,
@@ -131,17 +139,18 @@ class LocalStorage:
 
     async def list(self, prefix: str = "", *, limit: int = 1000) -> AsyncIterator[StoredObject]:
         root = Path(self.config.root)
-        target = root / prefix.lstrip("/") if prefix else root
         if not root.exists():
             return
+        # Prefix-targeted glob avoids walking the full tree when callers
+        # query a deep sub-prefix in a large bucket.
+        normalised = prefix.lstrip("/")
+        pattern = f"{normalised}**/*" if normalised else "**/*"
         count = 0
-        for path in sorted(root.rglob("*")):
+        for path in sorted(root.glob(pattern)):
             if not path.is_file():
                 continue
             rel = path.relative_to(root).as_posix()
-            if prefix and not rel.startswith(prefix.lstrip("/")):
-                continue
-            if not str(path).startswith(str(target)) and prefix:
+            if normalised and not rel.startswith(normalised):
                 continue
             stat = await asyncio.to_thread(path.stat)
             yield StoredObject(
@@ -172,6 +181,12 @@ class LocalStorage:
         if self.config.base_url:
             base = self.config.base_url.rstrip("/")
             return f"{base}/{quote(key)}?{query}"
+        warnings.warn(
+            "LocalStorage.signed_url called without base_url; returning file:// URL "
+            "(safe for tests only — set LocalConfig.base_url in production)",
+            UserWarning,
+            stacklevel=2,
+        )
         return f"file://{self._path(key)}?{query}"
 
     def verify_signed_url(self, key: str, expires: int, sig: str, *, method: str = "GET") -> bool:

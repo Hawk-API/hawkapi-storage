@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from hawkapi import HTTPException, Request
 
@@ -13,7 +15,9 @@ class _StateNamespace:
     storage: Any
 
 
-_ACTIVE: dict[int, Storage] = {}
+# WeakKeyDictionary avoids the ``id(app)`` ABA hazard if an app is GC'd and
+# Python reuses the address for a new object.
+_ACTIVE: WeakKeyDictionary[Any, Storage] = WeakKeyDictionary()
 _LAST: list[Storage | None] = [None]
 
 
@@ -22,7 +26,8 @@ def init_storage(app: Any, *, storage: Storage) -> Storage:
     if getattr(app, "state", None) is None:
         app.state = _StateNamespace()
     app.state.storage = storage
-    _ACTIVE[id(app)] = storage
+    with contextlib.suppress(TypeError):
+        _ACTIVE[app] = storage
     _LAST[0] = storage
     return storage
 
@@ -30,7 +35,10 @@ def init_storage(app: Any, *, storage: Storage) -> Storage:
 def resolve_storage(app: Any) -> Storage | None:
     if app is None:
         return _LAST[0]
-    found = _ACTIVE.get(id(app))
+    try:
+        found = _ACTIVE.get(app)
+    except TypeError:
+        found = None
     if found is not None:
         return found
     state = getattr(app, "state", None)

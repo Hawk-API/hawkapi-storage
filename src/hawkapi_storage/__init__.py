@@ -20,7 +20,7 @@ from ._local import LocalConfig, LocalStorage
 from ._plugin import get_storage, init_storage, resolve_storage
 from ._s3 import S3Config, S3Storage
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AzureConfig",

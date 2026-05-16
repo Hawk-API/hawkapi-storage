@@ -28,26 +28,43 @@ class AzureStorage:
     name: str = "azure"
     _service: Any = field(default=None, init=False)
     _container: Any = field(default=None, init=False)
+    _init_lock: Any = field(default=None, init=False, repr=False)
+
+    def _container_lock(self) -> Any:
+        import threading  # noqa: PLC0415
+
+        if self._init_lock is None:
+            self._init_lock = threading.Lock()
+        return self._init_lock
 
     def _get_container(self) -> Any:
         if self._container is not None:
             return self._container
-        try:
-            from azure.storage.blob import BlobServiceClient  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover
-            raise StorageError(
-                "azure-storage-blob not installed; pip install 'hawkapi-storage[azure]'"
-            ) from exc
-        if self.config.connection_string:
-            self._service = BlobServiceClient.from_connection_string(self.config.connection_string)
-        elif self.config.account_url and self.config.account_key:
-            self._service = BlobServiceClient(
-                account_url=self.config.account_url, credential=self.config.account_key
-            )
-        else:
-            raise StorageError("AzureConfig requires connection_string or account_url+account_key")
-        self._container = self._service.get_container_client(self.config.container)
-        return self._container
+        with self._container_lock():
+            if self._container is not None:
+                return self._container
+            try:
+                from azure.storage.blob import (  # type: ignore[import-not-found]  # noqa: PLC0415
+                    BlobServiceClient,
+                )
+            except ImportError as exc:  # pragma: no cover
+                raise StorageError(
+                    "azure-storage-blob not installed; pip install 'hawkapi-storage[azure]'"
+                ) from exc
+            if self.config.connection_string:
+                self._service = BlobServiceClient.from_connection_string(
+                    self.config.connection_string
+                )
+            elif self.config.account_url and self.config.account_key:
+                self._service = BlobServiceClient(
+                    account_url=self.config.account_url, credential=self.config.account_key
+                )
+            else:
+                raise StorageError(
+                    "AzureConfig requires connection_string or account_url+account_key"
+                )
+            self._container = self._service.get_container_client(self.config.container)
+            return self._container
 
     async def put(
         self,
@@ -112,8 +129,19 @@ class AzureStorage:
         container = self._get_container()
         try:
             await asyncio.to_thread(container.delete_blob, key)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Swallow only "blob does not exist" — every other failure
+            # (auth, network, permission) must propagate so callers can
+            # respond to the real problem (CWE-732).
+            try:
+                from azure.core.exceptions import (  # type: ignore[import-not-found]  # noqa: PLC0415
+                    ResourceNotFoundError,
+                )
+            except ImportError:  # pragma: no cover
+                raise StorageError(str(exc)) from exc
+            if isinstance(exc, ResourceNotFoundError):
+                return
+            raise StorageError(str(exc)) from exc
 
     async def head(self, key: str) -> StoredObject:
         container = self._get_container()

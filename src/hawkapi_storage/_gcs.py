@@ -24,22 +24,35 @@ class GCSStorage:
     name: str = "gcs"
     _client: Any = field(default=None, init=False)
     _bucket: Any = field(default=None, init=False)
+    _init_lock: Any = field(default=None, init=False, repr=False)
+
+    def _bucket_lock(self) -> Any:
+        import threading  # noqa: PLC0415
+
+        if self._init_lock is None:
+            self._init_lock = threading.Lock()
+        return self._init_lock
 
     def _get_bucket(self) -> Any:
         if self._bucket is not None:
             return self._bucket
-        try:
-            from google.cloud import storage  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover
-            raise StorageError(
-                "google-cloud-storage not installed; pip install 'hawkapi-storage[gcs]'"
-            ) from exc
-        if self.config.credentials_path:
-            self._client = storage.Client.from_service_account_json(self.config.credentials_path)
-        else:
-            self._client = storage.Client(project=self.config.project or None)
-        self._bucket = self._client.bucket(self.config.bucket)
-        return self._bucket
+        with self._bucket_lock():
+            if self._bucket is not None:
+                return self._bucket
+            try:
+                from google.cloud import storage  # type: ignore[import-not-found]  # noqa: PLC0415
+            except ImportError as exc:  # pragma: no cover
+                raise StorageError(
+                    "google-cloud-storage not installed; pip install 'hawkapi-storage[gcs]'"
+                ) from exc
+            if self.config.credentials_path:
+                self._client = storage.Client.from_service_account_json(
+                    self.config.credentials_path
+                )
+            else:
+                self._client = storage.Client(project=self.config.project or None)
+            self._bucket = self._client.bucket(self.config.bucket)
+            return self._bucket
 
     async def put(
         self,

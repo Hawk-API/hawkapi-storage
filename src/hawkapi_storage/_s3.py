@@ -28,25 +28,40 @@ class S3Storage:
     config: S3Config
     name: str = "s3"
     _client: Any = field(default=None, init=False)
+    _init_lock: Any = field(default=None, init=False, repr=False)
+
+    def _client_lock(self) -> Any:
+        # Lazily create the lock so the dataclass remains hashable/copyable
+        # and we never bind it to a foreign event loop.
+        import threading  # noqa: PLC0415
+
+        if self._init_lock is None:
+            self._init_lock = threading.Lock()
+        return self._init_lock
 
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        try:
-            import boto3
-            from botocore.config import Config
-        except ImportError as exc:  # pragma: no cover
-            raise StorageError("boto3 not installed; pip install 'hawkapi-storage[s3]'") from exc
-        kwargs: dict[str, Any] = {"region_name": self.config.region}
-        if self.config.aws_access_key_id:
-            kwargs["aws_access_key_id"] = self.config.aws_access_key_id
-            kwargs["aws_secret_access_key"] = self.config.aws_secret_access_key
-        if self.config.endpoint_url:
-            kwargs["endpoint_url"] = self.config.endpoint_url
-        if self.config.use_path_style:
-            kwargs["config"] = Config(s3={"addressing_style": "path"})
-        self._client = boto3.client("s3", **kwargs)
-        return self._client
+        with self._client_lock():
+            if self._client is not None:
+                return self._client
+            try:
+                import boto3  # noqa: PLC0415
+                from botocore.config import Config  # noqa: PLC0415
+            except ImportError as exc:  # pragma: no cover
+                raise StorageError(
+                    "boto3 not installed; pip install 'hawkapi-storage[s3]'"
+                ) from exc
+            kwargs: dict[str, Any] = {"region_name": self.config.region}
+            if self.config.aws_access_key_id:
+                kwargs["aws_access_key_id"] = self.config.aws_access_key_id
+                kwargs["aws_secret_access_key"] = self.config.aws_secret_access_key
+            if self.config.endpoint_url:
+                kwargs["endpoint_url"] = self.config.endpoint_url
+            if self.config.use_path_style:
+                kwargs["config"] = Config(s3={"addressing_style": "path"})
+            self._client = boto3.client("s3", **kwargs)
+            return self._client
 
     async def put(
         self,
